@@ -473,6 +473,26 @@ def extraire_annonces(html):
         if not lien:
             continue
 
+        type_annonce = (
+    lien.get_text(
+        " ",
+        strip=True,
+    )
+    .casefold()
+)
+
+if type_annonce in {
+    "kot",
+    "studio",
+    "flat studio",
+}:
+    print(
+        f"🚫 Type exclu : "
+        f"{type_annonce} "
+        f"({id_annonce})"
+    )
+    continue
+
         url = lien.get(
             "href",
             "",
