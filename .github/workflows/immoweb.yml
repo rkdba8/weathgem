@@ -1,27 +1,233 @@
-- name: Cache Playwright browser
-  id: playwright-cache
-  uses: actions/cache@v4
-  with:
-    path: ~/.cache/ms-playwright
-    key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}-chromium-shell
+name: Veille Immoweb + Gemini
 
-- name: Install Playwright Chromium
-  if: steps.playwright-cache.outputs.cache-hit != 'true'
-  run: python -m playwright install --only-shell chromium
+on:
+  workflow_dispatch:
 
-- name: Test Chromium
-  id: chromium-test
-  continue-on-error: true
-  run: |
-    python - <<'PY'
-    from playwright.sync_api import sync_playwright
+  schedule:
+    # Toutes les 5 minutes.
+    # Décalé de 2 min pour éviter le pic pile au début de l'heure.
+    - cron: "2-59/5 * * * *"
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        print("Chromium OK")
-        browser.close()
-    PY
+permissions:
+  contents: write
 
-- name: Install Playwright system dependencies if needed
-  if: steps.chromium-test.outcome == 'failure'
-  run: python -m playwright install-deps chromium
+concurrency:
+  group: immoweb-watch
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+
+  watch:
+
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 10
+
+    steps:
+
+      # ---------------------------------------------------------
+      # REPO
+      # ---------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------
+      # PYTHON + CACHE PIP
+      # ---------------------------------------------------------
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ---------------------------------------------------------
+      # VERSION PLAYWRIGHT
+      # ---------------------------------------------------------
+
+      - name: Detect Playwright version
+        id: playwright-version
+        shell: bash
+        run: |
+          PW_VERSION="$(python -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          echo "version=${PW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Playwright version: ${PW_VERSION}"
+
+      # ---------------------------------------------------------
+      # CACHE CHROMIUM PLAYWRIGHT
+      # ---------------------------------------------------------
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}-chromium-shell
+
+      # ---------------------------------------------------------
+      # INSTALLE LE NAVIGATEUR UNIQUEMENT SI PAS EN CACHE
+      # ---------------------------------------------------------
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --only-shell chromium
+
+      # ---------------------------------------------------------
+      # PHASE 2 :
+      # ON TESTE D'ABORD SANS INSTALL-DEPS
+      # ---------------------------------------------------------
+
+      - name: Test Chromium without extra system dependencies
+        id: chromium-test
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          print("🧪 Test Chromium sans install-deps...")
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(
+                  headless=True
+              )
+
+              page = browser.new_page()
+              page.set_content(
+                  "<html><body>Chromium OK</body></html>"
+              )
+
+              print(
+                  "✅ Chromium démarre correctement "
+                  "sans install-deps."
+              )
+
+              browser.close()
+          PY
+
+      # ---------------------------------------------------------
+      # FALLBACK :
+      # UNIQUEMENT SI CHROMIUM N'A PAS DEMARRE
+      # ---------------------------------------------------------
+
+      - name: Install Playwright system dependencies
+        if: steps.chromium-test.outcome == 'failure'
+        run: |
+          echo "⚠️ Chromium n'a pas démarré directement."
+          echo "Installation des dépendances Playwright..."
+          python -m playwright install-deps chromium
+
+      # ---------------------------------------------------------
+      # SI FALLBACK, ON VERIFIE QUE TOUT FONCTIONNE APRES
+      # ---------------------------------------------------------
+
+      - name: Verify Chromium after fallback
+        if: steps.chromium-test.outcome == 'failure'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          print("🧪 Vérification Chromium après install-deps...")
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(
+                  headless=True
+              )
+
+              page = browser.new_page()
+              page.set_content(
+                  "<html><body>Chromium OK</body></html>"
+              )
+
+              print(
+                  "✅ Chromium fonctionne après install-deps."
+              )
+
+              browser.close()
+          PY
+
+      # ---------------------------------------------------------
+      # INFO DEBUG
+      # ---------------------------------------------------------
+
+      - name: Playwright browser info
+        run: |
+          echo "Playwright cache hit: ${{ steps.playwright-cache.outputs.cache-hit }}"
+          echo "Initial Chromium test: ${{ steps.chromium-test.outcome }}"
+          python -m playwright install --list
+
+      # ---------------------------------------------------------
+      # SCRAPER
+      # ---------------------------------------------------------
+
+      - name: Run watcher
+        env:
+
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          GEMINI_MODEL: gemini-3.5-flash-lite
+
+          GEMINI_DAILY_SAFETY_CAP: "450"
+
+          MAX_AI_CALLS_PER_RUN: "12"
+
+          GEMINI_DELAY_SECONDS: "4.2"
+
+          # Pages Immoweb analysées à chaque passage.
+          MAX_PAGES: "3"
+
+          # Pendant les tests :
+          # 1 = envoie aussi les REJETER.
+          #
+          # Ensuite mets 0 pour ne recevoir
+          # que CONTACTER + CONSIDERER.
+          NOTIFY_ALL: "1"
+
+          # Vide = aucune contrainte
+          # de date de disponibilité.
+          DATE_CIBLE: ""
+
+        run: python immoweb_watch.py
+
+      # ---------------------------------------------------------
+      # PERSISTANCE ETAT
+      # ---------------------------------------------------------
+
+      - name: Persist seen + quota state
+        if: always()
+
+        run: |
+
+          git config user.name "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add seen.json gemini_usage.json 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No state change to commit."
+            exit 0
+          fi
+
+          git commit -m \
+            "chore: update Immoweb watcher state [skip ci]"
+
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"
