@@ -345,21 +345,15 @@ def envoyer_telegram(texte):
 def get_browser_context(playwright):
 
     browser = playwright.chromium.launch(
-
-        headless=True,
-
-        args=[
-
-            "--disable-blink-features="
-            "AutomationControlled",
-
-            "--no-sandbox",
-
-            "--disable-dev-shm-usage",
-
-            "--disable-gpu",
-        ],
-    )
+    channel="chrome",
+    headless=True,
+    args=[
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+    ],
+)
 
     context = browser.new_context(
 
