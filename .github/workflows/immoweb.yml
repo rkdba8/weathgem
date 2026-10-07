@@ -1,3 +1,67 @@
+name: Veille Immoweb + Gemini
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 4 passages par jour, heure de Bruxelles.
+    - cron: "7 8,12,19,23 * * *"
+      timezone: "Europe/Brussels"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: immoweb-watch
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  watch:
+
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 10
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Le script utilise channel="chrome".
+      # Chrome est déjà présent sur le runner GitHub Ubuntu.
+      - name: Check Chrome
+        run: google-chrome --version
+
+      - name: Smoke test Chrome with Playwright
+        shell: bash
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(
+                  channel="chrome",
+                  headless=True,
+              )
+              page = browser.new_page()
+              page.set_content("<html><body>Chrome OK</body></html>")
+              print("✅ Chrome + Playwright OK")
+              browser.close()
           PY
 
       - name: Run watcher
