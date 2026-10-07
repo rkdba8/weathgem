@@ -4,8 +4,7 @@ on:
   workflow_dispatch:
 
   schedule:
-    # Toutes les 5 minutes.
-    # Décalé de 2 min pour éviter le pic pile au début de l'heure.
+    # Toutes les 5 minutes, décalé de 2 minutes.
     - cron: "2-59/5 * * * *"
 
 permissions:
@@ -15,20 +14,31 @@ concurrency:
   group: immoweb-watch
   cancel-in-progress: false
 
-jobs:
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
+jobs:
   watch:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     timeout-minutes: 10
 
     steps:
 
+      # ---------------------------------------------------------
+      # REPO
+      # ---------------------------------------------------------
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ---------------------------------------------------------
+      # PYTHON + CACHE PIP
+      # ---------------------------------------------------------
 
       - name: Python
         uses: actions/setup-python@v5
@@ -36,10 +46,67 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ---------------------------------------------------------
+      # VERSION PLAYWRIGHT
+      # Sert à invalider automatiquement le cache navigateur
+      # si Playwright change de version.
+      # ---------------------------------------------------------
+
+      - name: Detect Playwright version
+        id: playwright-version
+        shell: bash
         run: |
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          PW_VERSION="$(python -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          echo "version=${PW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Playwright version: ${PW_VERSION}"
+
+      # ---------------------------------------------------------
+      # CACHE DU NAVIGATEUR PLAYWRIGHT
+      # ---------------------------------------------------------
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}-chromium-shell
+
+      # ---------------------------------------------------------
+      # DEPENDANCES SYSTEME
+      #
+      # On garde install-deps pour ne pas changer brutalement
+      # l'environnement qui fonctionne actuellement.
+      # ---------------------------------------------------------
+
+      - name: Install Playwright system dependencies
+        run: python -m playwright install-deps chromium
+
+      # ---------------------------------------------------------
+      # CHROMIUM
+      #
+      # Téléchargé uniquement si absent du cache.
+      # --only-shell = uniquement la version utilisée en headless.
+      # ---------------------------------------------------------
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --only-shell chromium
+
+      # ---------------------------------------------------------
+      # DEBUG CACHE
+      # ---------------------------------------------------------
+
+      - name: Playwright browser info
+        run: |
+          echo "Cache hit: ${{ steps.playwright-cache.outputs.cache-hit }}"
+          python -m playwright install --list
+
+      # ---------------------------------------------------------
+      # SCRAPER
+      # ---------------------------------------------------------
 
       - name: Run watcher
         env:
@@ -58,21 +125,20 @@ jobs:
 
           GEMINI_DELAY_SECONDS: "4.2"
 
-          # Pages Immoweb analysées à chaque passage.
           MAX_PAGES: "3"
 
-          # Pendant les tests :
+          # Tests :
           # 1 = envoie aussi les REJETER.
-          #
-          # Ensuite mets 0 pour ne recevoir
-          # que CONTACTER + CONSIDERER.
+          # 0 = uniquement CONTACTER + CONSIDERER.
           NOTIFY_ALL: "1"
 
-          # Vide = aucune contrainte
-          # de date de disponibilité.
           DATE_CIBLE: ""
 
         run: python immoweb_watch.py
+
+      # ---------------------------------------------------------
+      # ETAT
+      # ---------------------------------------------------------
 
       - name: Persist seen + quota state
         if: always()
