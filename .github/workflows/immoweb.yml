@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
 
   schedule:
-    # 4 passages par jour, heure de Bruxelles.
+    # 08:07, 12:07, 19:07 et 23:07 heure de Bruxelles.
+    # GitHub gère automatiquement l'heure d'été / hiver.
     - cron: "7 8,12,19,23 * * *"
       timezone: "Europe/Brussels"
 
@@ -21,13 +22,10 @@ env:
 
 jobs:
   watch:
-
     runs-on: ubuntu-24.04
-
     timeout-minutes: 10
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -42,12 +40,10 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # Le script utilise channel="chrome".
-      # Chrome est déjà présent sur le runner GitHub Ubuntu.
-      - name: Check Chrome
+      - name: Chrome version
         run: google-chrome --version
 
-      - name: Smoke test Chrome with Playwright
+      - name: Smoke-test Chrome + Playwright
         shell: bash
         run: |
           python - <<'PY'
@@ -58,8 +54,12 @@ jobs:
                   channel="chrome",
                   headless=True,
               )
+
               page = browser.new_page()
-              page.set_content("<html><body>Chrome OK</body></html>")
+              page.set_content(
+                  "<html><body>Chrome OK</body></html>"
+              )
+
               print("✅ Chrome + Playwright OK")
               browser.close()
           PY
@@ -77,12 +77,10 @@ jobs:
 
           MAX_PAGES: "3"
 
-          # Production : seulement CONTACTER + CONSIDERER.
+          # 0 = Telegram uniquement pour CONTACTER + CONSIDERER.
           NOTIFY_ALL: "0"
 
-          # Vide = pas de filtre sur la date de disponibilité.
-          # Le filtre "publiée aujourd'hui" est indépendant
-          # et est géré directement dans immoweb_watch.py.
+          # Vide = aucune contrainte sur la date de disponibilité.
           DATE_CIBLE: ""
 
         run: python immoweb_watch.py
