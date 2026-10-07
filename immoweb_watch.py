@@ -105,17 +105,6 @@ USAGE_FILE = BASE_DIR / "gemini_usage.json"
 
 
 # ---------------------------------------------------------------------------
-# REGEX IMMOWEB
-# ---------------------------------------------------------------------------
-
-REGEX_URL = re.compile(
-    r'https://www\.immoweb\.be/en/classified/'
-    r'[a-z\-]+/for-rent/'
-    r'[^/\"]+/\d+/(\d+)'
-)
-
-
-# ---------------------------------------------------------------------------
 # USER AGENT
 # ---------------------------------------------------------------------------
 
@@ -445,31 +434,85 @@ def url_recherche_page(
 
 def extraire_annonces(html):
 
-    annonces = []
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
 
+    annonces = []
     ids_vus = set()
 
-    for m in REGEX_URL.finditer(html):
+    # Uniquement la vraie liste de résultats Immoweb
+    liste = soup.select_one(
+        "ul#main-content"
+    )
 
-        id_annonce = m.group(1)
+    if not liste:
 
-        url = (
-            m.group(0)
-            .split("?")[0]
+        print(
+            "⚠️ Liste #main-content introuvable."
         )
 
-        if id_annonce not in ids_vus:
+        return []
 
-            ids_vus.add(
-                id_annonce
+    # Uniquement les vraies cartes d'annonces
+    for article in liste.select(
+        'article[id^="classified_"]'
+    ):
+
+        article_id = article.get(
+            "id",
+            "",
+        )
+
+        id_annonce = article_id.removeprefix(
+            "classified_"
+        )
+
+        if not id_annonce.isdigit():
+            continue
+
+        lien = article.select_one(
+            "a.card__title-link[href]"
+        )
+
+        if not lien:
+            continue
+
+        url = lien.get(
+            "href",
+            "",
+        ).split("?")[0]
+
+        # Garde uniquement une vraie annonce Immoweb.
+        # On accepte EN et FR car le navigateur utilise fr-BE.
+        if not (
+            url.startswith(
+                "https://www.immoweb.be/en/classified/"
             )
+            or url.startswith(
+                "https://www.immoweb.be/fr/annonce/"
+            )
+        ):
+            continue
 
-            annonces.append({
+        # L'ID du lien doit correspondre à l'ID de la carte.
+        if not url.rstrip("/").endswith(
+            f"/{id_annonce}"
+        ):
+            continue
 
-                "id": id_annonce,
+        if id_annonce in ids_vus:
+            continue
 
-                "url": url,
-            })
+        ids_vus.add(
+            id_annonce
+        )
+
+        annonces.append({
+            "id": id_annonce,
+            "url": url,
+        })
 
     return annonces
 
