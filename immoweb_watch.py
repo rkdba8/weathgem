@@ -161,8 +161,6 @@ class FicheAnnonce(BaseModel):
 
     equipements: list[str] = Field(default_factory=list)
     details_importants: list[str] = Field(default_factory=list)
-    infos_manquantes: list[str] = Field(default_factory=list)
-    resume: str
 
 # ---------------------------------------------------------------------------
 # MEMOIRE
@@ -894,94 +892,92 @@ def euros(montant):
     return brut.replace(",", "_").replace(".", ",").replace("_", " ") + " €"
 
 
-def analyser_couts(loyer, charges_immoweb, fiche, description):
-    """Construire un récapitulatif prudent à partir des montants traçables.
+def charges_zero_explicites(description):
+    """Zéro charges uniquement si le texte le dit explicitement."""
+    return bool(re.search(
+        r"\b(?:sans\s+(?:aucune\s+)?charges?|aucunes?\s+charges?|"
+        r"pas\s+de\s+charges?|charges?\s*[:=]\s*0\s*(?:€|euros?)?)\b",
+        description,
+        re.IGNORECASE,
+    ))
 
-    Les provisions de la description et celles d'Immoweb représentent le MÊME
-    poste : on ne les additionne donc jamais. Un garage séparé est un autre
-    poste, ajouté seulement si son caractère obligatoire est certain ; sinon
-    un total alternatif est affiché.
+
+def analyser_couts(loyer, charges_immoweb, fiche, description, compact=False):
+    """Afficher UNIQUEMENT des montants présents dans la fiche ou la description.
+
+    Si aucune charge n'est mentionnée, afficher simplement le loyer : ni zéro
+    supposé, ni « charges inconnues », ni question à poser. Les provisions de
+    la fiche et du texte désignent le même poste ; ne jamais les additionner.
     """
-    lignes = []
-    manquantes = []
     desc = fiche.charges_description_eur
-    if not montant_confirme_dans_description(desc, description):
-        if desc is not None:
-            manquantes.append("Montant des provisions suggéré mais non vérifié dans la description")
+    if desc == 0 and charges_zero_explicites(description):
+        pass
+    elif not montant_confirme_dans_description(desc, description):
         desc = None
-
-    lignes.append(f"💶 <b>Loyer :</b> {euros(loyer)}")
-    lignes.append(f"🧾 <b>Charges affichées par Immoweb :</b> {euros(charges_immoweb)}")
-    if desc is not None:
-        precision = f" — {fiche.charges_description_precision}" if fiche.charges_description_precision else ""
-        lignes.append(
-            f"🔎 <b>Provisions dans la description :</b> {euros(desc)}"
-            f"{html_lib.escape(precision)}"
-        )
 
     conflit = (
         charges_immoweb is not None and desc is not None
         and abs(charges_immoweb - desc) >= 0.01
     )
-    if conflit:
-        lignes.append("⚠️ <b>Montants de charges contradictoires :</b> à vérifier avec le propriétaire")
-        manquantes.append("Confirmer le montant exact des provisions : fiche et description différentes")
-
-    # La description peut compléter un champ de charges absent.
     provisions = desc if desc is not None else charges_immoweb
-    extras_obligatoires = 0.0
-    extras_conditionnels = 0.0
-    vus = set()
+
+    supplements = []
+    extras_obligatoires = []
+    deja_vus = set()
     for frais in fiche.frais_mensuels_supplementaires[:8]:
         if not montant_confirme_dans_description(frais.montant_eur, description):
-            manquantes.append(f"Vérifier le montant annoncé pour {frais.libelle}")
             continue
-        libelle = frais.libelle.strip() or "Frais supplémentaire"
-        # Les provisions ne peuvent JAMAIS être redéclarées comme supplément.
-        normalise = unicodedata.normalize("NFKD", libelle.casefold())
-        normalise = "".join(c for c in normalise if not unicodedata.combining(c))
-        if any(mot in normalise for mot in ("provision", "charge commune", "charges locativ")):
+        libelle = (frais.libelle or '').strip() or 'Supplément'
+        normalise = unicodedata.normalize('NFKD', libelle.casefold())
+        normalise = ''.join(c for c in normalise if not unicodedata.combining(c))
+        if any(m in normalise for m in ('provision', 'charge commune', 'charges locativ')):
             continue
         cle = (normalise, round(frais.montant_eur, 2))
-        if cle in vus:
+        if cle in deja_vus:
             continue
-        vus.add(cle)
-        if frais.statut == "obligatoire":
-            extras_obligatoires += frais.montant_eur
-            statut = "obligatoire"
-        elif frais.statut == "facultatif":
-            statut = "facultatif (non compté)"
+        deja_vus.add(cle)
+        if frais.statut == 'obligatoire':
+            extras_obligatoires.append((libelle, frais.montant_eur))
         else:
-            extras_conditionnels += frais.montant_eur
-            statut = "à confirmer"
-            manquantes.append(f"{libelle} : coût obligatoire ou facultatif ?")
-        lignes.append(
-            f"➕ <b>{html_lib.escape(libelle)} :</b> {euros(frais.montant_eur)}"
-            f" / mois ({statut})"
-        )
+            supplements.append((libelle, frais.montant_eur, frais.statut))
 
-    if loyer is None or provisions is None or conflit:
-        lignes.append("📊 <b>Total mensuel :</b> impossible à confirmer avec les données actuelles")
-        if provisions is None:
-            manquantes.append("Montant des charges/provisions mensuelles")
-    else:
-        minimum = loyer + provisions + extras_obligatoires
-        lignes.append(f"📊 <b>Loyer + provisions et frais obligatoires connus :</b> {euros(minimum)} / mois")
-        if extras_conditionnels:
+    lignes = []
+    if loyer is not None:
+        if conflit:
+            lignes.append(f'💶 <b>Loyer : {euros(loyer)}/mois</b>')
             lignes.append(
-                f"📊 <b>Avec les suppléments à confirmer :</b> "
-                f"{euros(minimum + extras_conditionnels)} / mois"
+                f'🧾 Charges : {euros(charges_immoweb)} (Immoweb) · '
+                f'{euros(desc)} (description)'
             )
+        else:
+            elements = [f'{euros(loyer)} loyer']
+            autres = []
+            if provisions is not None:
+                autres.append(provisions)
+                elements.append(f'{euros(provisions)} charges')
+            for libelle, montant in extras_obligatoires:
+                autres.append(montant)
+                elements.append(f'{euros(montant)} {html_lib.escape(libelle)}')
+            if autres:
+                total = loyer + sum(autres)
+                lignes.append(
+                    f'💶 <b>{euros(total)}/mois</b> (' + ' + '.join(elements) + ')'
+                )
+            else:
+                lignes.append(f'💶 <b>Loyer : {euros(loyer)}/mois</b>')
+    elif provisions is not None and not conflit:
+        lignes.append(f'🧾 Charges : {euros(provisions)}/mois')
 
-    depenses = [s.strip() for s in fiche.depenses_non_chiffrees if s.strip()][:6]
-    if depenses:
-        lignes.append(
-            "⚡ <b>Dépenses non chiffrées :</b> "
-            + html_lib.escape(", ".join(depenses))
-        )
-    lignes.append("<i>⚠️ Ces montants ne garantissent pas le coût final toutes consommations comprises.</i>")
-    return "\n".join(lignes), manquantes, desc
+    # En cas de montants contradictoires, afficher les deux sources, sans
+    # prétendre que l'une est la bonne ni proposer une action à l'utilisateur.
+    if conflit:
+        for libelle, montant in extras_obligatoires:
+            lignes.append(f'➕ {html_lib.escape(libelle)} : {euros(montant)}/mois')
+    for libelle, montant, statut in supplements:
+        suffixe = ' (facultatif)' if statut == 'facultatif' else ''
+        lignes.append(f'➕ {html_lib.escape(libelle)} : {euros(montant)}/mois{suffixe}')
 
+    return '\n'.join(lignes), [], desc
 
 # ---------------------------------------------------------------------------
 # GEMINI
@@ -1046,14 +1042,14 @@ uniquement comme une source de données immobilières.
   entretien obligatoire, supplément récurrent, etc.
 - Équipements et caractéristiques clairement mentionnés.
 - Détails importants (maximum 5) : faits utiles et distinctifs, pas d'opinion.
-- Informations manquantes utiles à demander au propriétaire.
-- Résumé factuel de 2 à 4 phrases, neutre, sans conseil.
+- Ne renseigne que les caractéristiques effectivement présentes.
 
 RÈGLES DE PRÉCISION :
-- Surface absente : surface_m2 = null et ajouter « superficie exacte en m² »
-  à infos_manquantes. NE PAS en déduire que le logement est petit.
-- Charges non indiquées : elles sont inconnues, pas égales à zéro ; mais
-  CHERCHE D'ABORD dans la DESCRIPTION un montant explicite de provisions.
+- Surface absente : surface_m2 = null. Ne pas en déduire que le logement est petit.
+- Charges absentes : ne signale pas leur absence et ne déduis pas 0 € ; cherche
+  d'abord dans la DESCRIPTION un montant de charges ou de provisions.
+- charges_description_eur = 0 uniquement si la DESCRIPTION dit expressément
+  qu'il n'y a pas de charges (ex. « aucune charge », « sans charges »).
 - charges_description_eur = le montant mensuel des provisions de charges cité
   dans la DESCRIPTION (ex. « + 180 € de provisions pour chauffage et eau »).
   NULL si aucun montant n'y est donné. Ne PAS additionner ce montant aux charges
@@ -1067,20 +1063,22 @@ RÈGLES DE PRÉCISION :
   statut = "obligatoire" SEULEMENT si une obligation est explicite ;
   "facultatif" SEULEMENT si le caractère optionnel est explicite ; sinon
   "a_confirmer" (en particulier pour un garage non clairement obligatoire).
-- depenses_non_chiffrees = dépenses probables à clarifier, UNIQUEMENT si le
-  texte mentionne un compteur individuel, une facturation distincte ou une
-  consommation non comprise. Ne jamais inventer de montant.
+- depenses_non_chiffrees = uniquement les consommations individuelles ou
+  facturations séparées EXPLICITEMENT mentionnées, sans phrase « à vérifier »,
+  « montant inconnu », « montant non chiffré » ou question.
 - Ne PAS prendre les prix d'autres annonces, d'assurances (« Assurez ce bien »),
   de devis, de publicités ou d'un loyer historique. N'utilise QUE la
   DESCRIPTION DU BIEN pour les montants de ces nouveaux champs.
-- Les chiffres manquants ou contradictoires sont à signaler, pas à estimer.
+- N'invente aucun chiffre et n'insiste jamais sur ce qui est absent.
+- S'il existe deux montants contradictoires, garde les deux valeurs et leurs
+  sources sans déduire de total.
 - Pour ascenseur, terrasse, balcon et inclusions, true/false uniquement si
   explicitement affirmé/nié ; sinon null.
 - Chauffage/eau/électricité individuels ne sont pas inclus dans les charges
   sauf indication explicite contraire.
 - État « renove » seulement si des travaux réels sont décrits ;
   « repeint » / « rafraîchi » ne signifie pas rénové.
-- Tout élément incertain est noté dans infos_manquantes et non inventé.
+- Pas de rubrique « informations manquantes », « à vérifier » ou questions.
 - N'utilise aucun vocabulaire de décision (à contacter, à considérer, à rejeter,
   intéressant, mauvaise affaire, vaut le coup, etc.).
 
@@ -1143,97 +1141,137 @@ Retourne uniquement les champs de la fiche structurée, sans verdict.
 
 
 # ---------------------------------------------------------------------------
-# Compléter les données absentes sans inventer de valeur.
-# ---------------------------------------------------------------------------
-
-def completer_informations_manquantes(fiche, charges, charges_description=None):
-    manquantes = {s.strip().casefold() for s in fiche.infos_manquantes}
-    if fiche.surface_m2 is None and not any(
-        "surface" in s or "superficie" in s for s in manquantes
-    ):
-        fiche.infos_manquantes.append("Superficie exacte en m²")
-
-    if charges is None and charges_description is None and not any(
-        "charge" in s for s in manquantes
-    ):
-        fiche.infos_manquantes.append("Montant et composition des charges")
-
-    return fiche
-
-
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# FORMAT BOOL
-# ---------------------------------------------------------------------------
-
-def bool_texte(value):
-    if value is True:
-        return "oui"
-    if value is False:
-        return "non"
-    return "non communiqué"
-
-# ---------------------------------------------------------------------------
 # TELEGRAM MESSAGE
 # ---------------------------------------------------------------------------
 
 def format_message(annonce, titre, loyer, charges, date_texte, fiche,
                    description=""):
-    def e(val):
-        return html_lib.escape(str(val))
+    """Telegram minimaliste, exclusivement des faits présents dans l'annonce.
 
-    def valeur(val, suffixe=""):
-        return f"{val:g}{suffixe}" if isinstance(val, (int, float)) else (
-            e(val) if val is not None else "non communiqué"
+    Aucun « non communiqué », aucune liste de questions et aucun verdict.
+    """
+    def e(value):
+        return html_lib.escape(str(value))
+
+    def fait_affichable(value):
+        """N'afficher que des faits, jamais des remarques sur les absences."""
+        if value is None:
+            return False
+        texte = str(value).strip()
+        return bool(texte) and texte.casefold() != 'none' and not any(mot in texte.casefold() for mot in (
+            'non communiqué', 'non communique', 'non indiqué', 'non indique',
+            'inconnu', 'inconnue', 'pas précisé', 'non précisé',
+            'à vérifier', 'a verifier', 'à demander', 'a demander',
+            'à confirmer', 'a confirmer', 'manquant',
+        ))
+
+    prix_txt, _, charges_desc_valides = analyser_couts(
+        loyer, charges, fiche, description, compact=True
+    )
+    provisions_connues = charges is not None or charges_desc_valides is not None
+
+    typ = (fiche.type_logement or '').strip()
+    ville = (fiche.localisation or '').strip()
+    entete = ' · '.join(x for x in (typ, ville) if x) or titre[:85] or 'Annonce Immoweb'
+    lignes = [f'🏠 <b>{e(entete[:90])}</b>']
+    if prix_txt:
+        lignes.append(prix_txt)
+
+    # Afficher ce que couvrent les charges seulement si l'annonce le précise.
+    if provisions_connues:
+        couverture = (
+            fiche.charges_description_precision if charges_desc_valides is not None
+            else ', '.join(fiche.charges_nature[:3])
         )
+        if fait_affichable(couverture):
+            lignes.append('🧾 ' + e(str(couverture).strip()[:115]))
 
-    couts_txt, manquantes_couts, _ = analyser_couts(
-        loyer, charges, fiche, description
-    )
-    # Ne pas modifier fiche.infos_manquantes à chaque formatage Telegram.
-    toutes_manquantes = list(dict.fromkeys(
-        [*fiche.infos_manquantes, *manquantes_couts]
-    ))
-    charges_detail = ", ".join(fiche.charges_nature[:5]) or "composition non précisée"
-    details = " • ".join(fiche.details_importants[:5]) or "aucun détail supplémentaire indiqué"
-    manquantes = " • ".join(toutes_manquantes[:10]) or "aucune signalée"
-    equipements = ", ".join(fiche.equipements[:8]) or "aucun précisé"
-    surface_txt = (
-        f"{fiche.surface_m2:g} m²" if fiche.surface_m2 is not None
-        else "non communiquée"
-    )
-    terrasse_txt = bool_texte(fiche.terrasse)
-    if fiche.terrasse_m2 is not None:
-        terrasse_txt += f" ({fiche.terrasse_m2:g} m²)"
+    caracteristiques = []
+    if fiche.surface_m2 is not None:
+        caracteristiques.append(f'{fiche.surface_m2:g} m²')
+    if fiche.chambres is not None:
+        caracteristiques.append(f'{fiche.chambres} ch.')
+    if fiche.salles_de_bain is not None:
+        caracteristiques.append(f'{fiche.salles_de_bain} SDB')
+    if fiche.etage:
+        caracteristiques.append(f'étage {fiche.etage}')
+    if caracteristiques:
+        lignes.append('📐 ' + e(' · '.join(caracteristiques)))
 
-    return (
-        "🏠 <b>NOUVELLE ANNONCE — FICHE RÉSUMÉE</b>\n\n"
-        f"<b>{e(titre)}</b>\n"
-        f"{couts_txt}\n\n"
-        f"📍 <b>Localisation :</b> {e(fiche.localisation or 'non communiquée')}\n"
-        f"🏘️ <b>Type :</b> {e(fiche.type_logement or 'non communiqué')} · "
-        f"<b>Étage :</b> {e(fiche.etage or 'non communiqué')}\n"
-        f"📐 <b>Surface :</b> {surface_txt} · "
-        f"<b>Chambres :</b> {valeur(fiche.chambres)} · "
-        f"<b>SDB :</b> {valeur(fiche.salles_de_bain)}\n"
-        f"📅 <b>Disponible :</b> {e(date_texte or 'non communiquée')}\n"
-        f"🏢 <b>Ascenseur :</b> {bool_texte(fiche.ascenseur)} · "
-        f"<b>Terrasse :</b> {terrasse_txt} · "
-        f"<b>Balcon :</b> {bool_texte(fiche.balcon)}\n"
-        f"🌱 <b>PEB :</b> {e(fiche.peb or 'non communiqué')} · "
-        f"<b>État décrit :</b> {e(fiche.etat.replace('_', ' '))}\n"
-        f"🧾 <b>Charges couvrent :</b> {e(charges_detail)}\n"
-        f"🔥 <b>Chauffage inclus :</b> {bool_texte(fiche.chauffage_inclus)} · "
-        f"<b>Eau :</b> {bool_texte(fiche.eau_incluse)} · "
-        f"<b>Électricité :</b> {bool_texte(fiche.electricite_incluse)}\n"
-        f"🛋️ <b>Équipements :</b> {e(equipements)}\n\n"
-        f"📝 <b>Résumé :</b> {e(fiche.resume[:650])}\n\n"
-        f"📌 <b>Détails annoncés :</b> {e(details)}\n"
-        f"❓ <b>Infos à demander :</b> {e(manquantes)}\n\n"
-        f'<a href="{html_lib.escape(annonce["url"], quote=True)}">'
-        "👉 Voir l'annonce</a>"
+    equip = []
+    for libelle, valeur in [('Terrasse', fiche.terrasse),
+                            ('Balcon', fiche.balcon),
+                            ('Ascenseur', fiche.ascenseur)]:
+        if valeur is True:
+            equip.append(f'{libelle} ✅')
+        elif valeur is False:
+            equip.append(f'{libelle} ❌')
+    if fiche.terrasse is True and fiche.terrasse_m2 is not None:
+        equip = [f'Terrasse {fiche.terrasse_m2:g} m² ✅' if s == 'Terrasse ✅' else s
+                 for s in equip]
+    if fiche.peb:
+        equip.append(f'PEB {fiche.peb}')
+    if equip:
+        lignes.append('🏢 ' + e(' · '.join(equip)))
+
+    etats = {
+        'renove': 'Rénové', 'rafraichi': 'Rafraîchi',
+        'bon_etat': 'Bon état', 'a_renover': 'À rénover',
+    }
+    autres = ([etats[fiche.etat]] if fiche.etat in etats else [])
+    for valeur in fiche.equipements[:5]:
+        valeur = str(valeur).strip()
+        if fait_affichable(valeur) and valeur.casefold() not in {x.casefold() for x in autres}:
+            autres.append(valeur)
+        if len(autres) >= 4:
+            break
+    if autres:
+        lignes.append('🛋️ ' + e(' · '.join(autres)))
+
+    # Informations factuelles sur les consommations, lorsqu'explicites.
+    consommation = []
+    inclus = [libelle for libelle, valeur in (
+        ('chauffage', fiche.chauffage_inclus),
+        ('eau', fiche.eau_incluse),
+        ('électricité', fiche.electricite_incluse),
+    ) if valeur is True]
+    if inclus:
+        consommation.append('Inclus : ' + ', '.join(inclus))
+    if fiche.chauffage_individuel is True:
+        consommation.append('Chauffage individuel')
+    for depense in fiche.depenses_non_chiffrees:
+        depense = str(depense).strip()
+        if not depense:
+            continue
+        if any(m in depense.casefold() for m in (
+            'à vérifier', 'a verifier', 'à confirmer', 'a confirmer',
+            'inconn', 'non chiffr', 'non communiqu', 'à demander', 'a demander',
+        )):
+            continue
+        if depense.casefold() not in {x.casefold() for x in consommation}:
+            consommation.append(depense)
+        if len(consommation) >= 3:
+            break
+    if consommation:
+        lignes.append('🔥 ' + e(' · '.join(consommation)))
+
+    mots_repetes = (
+        'chambre', 'm²', 'surface', 'salle de bain', 'sdb', 'loyer',
+        'charge', 'peb', 'ascenseur', 'terrasse', 'étage', 'etage',
+        'cuisine', 'double vitrage', 'interphone',
     )
+    for detail in fiche.details_importants:
+        detail = str(detail).strip()
+        if fait_affichable(detail) and not any(m in detail.casefold() for m in mots_repetes):
+            lignes.append('📌 ' + e(detail[:110]))
+            break
+
+    if date_texte:
+        lignes.append('📅 Disponible : ' + e(date_texte[:60]))
+
+    url = html_lib.escape(annonce['url'], quote=True)
+    lignes.append(f'<a href="{url}">👉 Voir l’annonce</a>')
+    return '\n'.join(lignes)
 
 # ---------------------------------------------------------------------------
 # MAIN
@@ -1556,13 +1594,6 @@ def main():
             description = extraire_description_annonce(
                 extraire_texte_utile(html_a)
             )
-            _, _, charges_desc_valides = analyser_couts(
-                loyer, charges, fiche, description
-            )
-            fiche = completer_informations_manquantes(
-                fiche, charges, charges_desc_valides
-            )
-
             print(f"🤖 Fiche extraite : {annonce['id']}")
 
             # Telegram : toutes les fiches sauf studios et kots.
